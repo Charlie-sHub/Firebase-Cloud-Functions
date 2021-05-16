@@ -6,6 +6,10 @@ import * as admin from "firebase-admin";
 import * as algoliaSearch from "algoliasearch";
 import firestore = require("@google-cloud/firestore");
 
+
+admin.initializeApp();
+const db = admin.firestore();
+
 // Backup function
 const fireClient = new firestore.v1.FirestoreAdminClient();
 
@@ -21,9 +25,6 @@ exports.scheduledFirestoreExport = functions.pubsub
       return fireClient.exportDocuments({
         name: databaseName,
         outputUriPrefix: bucket,
-        // Leave collectionIds empty to export all collections
-        // or set to a list of collection IDs to export,
-        // collectionIds: ['users', 'posts']
         collectionIds: [],
       })
           .then((responses) => {
@@ -31,8 +32,8 @@ exports.scheduledFirestoreExport = functions.pubsub
             console.log(`Operation Name: ${response["name"]}`);
             return;
           })
-          .catch((err) => {
-            console.error(err);
+          .catch((error) => {
+            console.error(error);
             throw new Error("Export operation failed");
           });
     });
@@ -45,9 +46,6 @@ const algoliaClient =algoliaSearch.default(APP_ID, ADMIN_KEY);
 const experienceIndex = algoliaClient.initIndex("prod_experience");
 const userIndex = algoliaClient.initIndex("prod_user");
 const tagIndex = algoliaClient.initIndex("prod_tag");
-
-admin.initializeApp();
-const db = admin.firestore();
 
 export const sendExperienceCollectionToAlgolia = functions.https
     .onRequest(async (req, res) => {
@@ -226,3 +224,51 @@ function tagRecord(id: string, data: firestore.DocumentData): any {
   };
   return record;
 }
+
+// Update propagation
+
+// This function may end up being called too much
+// At the very least it will have to be changed once the database is simplified
+export const propagateUserUpdate = functions.firestore.document("users/{id}")
+    .onUpdate(async (change) => {
+      try {
+        const updatePromises: any[] = [];
+        const id = change.after.id;
+        const updatedData = change.after.data();
+        const experiencesQuery = await db.collection("experiences").get();
+        const experienceByCreatorQuery = await db.collection("experiences").where("creatorId", "==", id).get();
+        const receiverNotificationQuery = await db.collection("notifications").where("receiver.id", "==", id).get();
+        const senderNotificationQuery = await db.collection("notifications").where("sender.id", "==", id).get();
+        // Updates the comments
+        experiencesQuery.docs.forEach(async (experienceDocument) => {
+          const commentsQuery = await experienceDocument.ref.collection("comments").where("poster.id", "==", id).get();
+          updatePromises.push(commentsQuery.docs.forEach((commentDocument) => commentDocument.ref.update({poster: updatedData})));
+        });
+        // Updates the creator of the experiences
+        experienceByCreatorQuery.docs.forEach((experienceDocument) => {
+          updatePromises.push(experienceDocument.ref.update({creator: updatedData}));
+        });
+        // Updates the receiver of the notifications
+        receiverNotificationQuery.docs.forEach((notificationDocument) => {
+          updatePromises.push(notificationDocument.ref.update({receiver: updatedData}));
+        });
+        // Updates the sender of the notifications
+        senderNotificationQuery.docs.forEach((notificationDocument) => {
+          updatePromises.push(notificationDocument.ref.update({sender: updatedData}));
+        });
+        await Promise.all(updatePromises);
+      } catch (error) {
+        console.error(error);
+      }
+    });
+
+// Image deletion
+export const deleteUserImageOnUserDelete = functions.firestore.document("users/{id}").onDelete(async (snapshot) => {
+  const userData = snapshot.data();
+  const fileName = userData.imageUrl.substr(userData.imageUrl.indexOf("%2F") + 3, (userData.imageUrl.indexOf("?")) - (userData.imageUrl.indexOf("%2F") + 3));
+  console.log(fileName);
+  const storage = admin.storage();
+  const defaultBucket = storage.bucket();
+  // const file = defaultBucket.deleteFiles(userData);
+  // return file.delete();
+});
