@@ -8,7 +8,7 @@ import firestore = require("@google-cloud/firestore");
 
 
 admin.initializeApp();
-const db = admin.firestore();
+const firestoreDatabase = admin.firestore();
 
 // Backup function
 const fireClient = new firestore.v1.FirestoreAdminClient();
@@ -50,7 +50,7 @@ const tagIndex = algoliaClient.initIndex("prod_tag");
 export const sendExperienceCollectionToAlgolia = functions.https
     .onRequest(async (req, res) => {
       const algoliaRecords : any[] = [];
-      const querySnapshot = await db.collection("experiences").get();
+      const querySnapshot = await firestoreDatabase.collection("experiences").get();
 
       querySnapshot.docs.forEach((doc) => {
         const document = doc.data();
@@ -68,7 +68,7 @@ export const sendExperienceCollectionToAlgolia = functions.https
 export const sendUserCollectionToAlgolia = functions.https
     .onRequest(async (req, res) => {
       const algoliaRecords : any[] = [];
-      const querySnapshot = await db.collection("users").get();
+      const querySnapshot = await firestoreDatabase.collection("users").get();
 
       querySnapshot.docs.forEach((doc) => {
         const document = doc.data();
@@ -86,7 +86,7 @@ export const sendUserCollectionToAlgolia = functions.https
 export const sendTagCollectionToAlgolia = functions.https
     .onRequest(async (req, res) => {
       const algoliaRecords : any[] = [];
-      const querySnapshot = await db.collection("tags").get();
+      const querySnapshot = await firestoreDatabase.collection("tags").get();
 
       querySnapshot.docs.forEach((doc) => {
         const document = doc.data();
@@ -110,15 +110,19 @@ export const addExperienceToIndex = functions.firestore.document("experiences/{i
       return experienceIndex.saveObject({...record, id});
     });
 
-export const updateExperienceIndex = functions.firestore.document("experiences/{id}")
-    .onUpdate(async (change) => {
-      const newData = change.after;
-      const id = newData.id;
-      const newDataData = newData.data();
-      const record = experienceRecord(id, newDataData);
-      record.objectID = id;
-      return experienceIndex.saveObject({...record, id});
-    });
+export const updateExperienceIndex = functions.region("europe-west1").https.onCall(async (data, context) => {
+  const experienceId = data.experienceId;
+  const experienceDocument = await firestoreDatabase.collection("experiences").doc(experienceId).get();
+  const experienceData = experienceDocument.data();
+  if (experienceData != undefined) {
+    const record = experienceRecord(experienceId, experienceData);
+    record.objectID = experienceId;
+    return experienceIndex.saveObject({...record});
+  } else {
+    console.log("Undefined experience document");
+    return "Error: undefined experience document";
+  }
+});
 
 export const deleteExperienceIndex = functions.firestore.document("experiences/{id}")
     .onDelete(async (snapshot) => {
@@ -135,15 +139,22 @@ export const addUserToIndex = functions.firestore.document("users/{id}")
       return userIndex.saveObject({...record, id});
     });
 
-export const updateUserIndex = functions.firestore.document("users/{id}")
-    .onUpdate(async (change) => {
-      const newData = change.after;
-      const id = newData.id;
-      const newDataData = newData.data();
-      const record = userRecord(id, newDataData);
-      record.objectID = id;
-      return userIndex.saveObject({...record, id});
-    });
+// This is a callable function to limit the amount of writes
+// User documents are updated for many reasons in the client
+// But the vast majority of the time this shouldn't be executed
+export const updateUserIndex = functions.region("europe-west1").https.onCall(async (data, context) => {
+  const userId = data.userId;
+  const userDocument = await firestoreDatabase.collection("users").doc(userId).get();
+  const userData = userDocument.data();
+  if (userData != undefined) {
+    const record = userRecord(userId, userData);
+    record.objectID = userId;
+    return userIndex.saveObject({...record});
+  } else {
+    console.log("Undefined user document");
+    return "Error: undefined user document";
+  }
+});
 
 export const deleteUserIndex = functions.firestore.document("users/{id}")
     .onDelete(async (snapshot) => {
@@ -229,46 +240,48 @@ function tagRecord(id: string, data: firestore.DocumentData): any {
 
 // This function may end up being called too much
 // At the very least it will have to be changed once the database is simplified
-export const propagateUserUpdate = functions.firestore.document("users/{id}")
-    .onUpdate(async (change) => {
-      try {
-        const updatePromises: any[] = [];
-        const id = change.after.id;
-        const updatedData = change.after.data();
-        const experiencesQuery = await db.collection("experiences").get();
-        const experienceByCreatorQuery = await db.collection("experiences").where("creatorId", "==", id).get();
-        const receiverNotificationQuery = await db.collection("notifications").where("receiver.id", "==", id).get();
-        const senderNotificationQuery = await db.collection("notifications").where("sender.id", "==", id).get();
-        // Updates the comments
-        experiencesQuery.docs.forEach(async (experienceDocument) => {
-          const commentsQuery = await experienceDocument.ref.collection("comments").where("poster.id", "==", id).get();
-          updatePromises.push(commentsQuery.docs.forEach((commentDocument) => commentDocument.ref.update({poster: updatedData})));
-        });
-        // Updates the creator of the experiences
-        experienceByCreatorQuery.docs.forEach((experienceDocument) => {
-          updatePromises.push(experienceDocument.ref.update({creator: updatedData}));
-        });
-        // Updates the receiver of the notifications
-        receiverNotificationQuery.docs.forEach((notificationDocument) => {
-          updatePromises.push(notificationDocument.ref.update({receiver: updatedData}));
-        });
-        // Updates the sender of the notifications
-        senderNotificationQuery.docs.forEach((notificationDocument) => {
-          updatePromises.push(notificationDocument.ref.update({sender: updatedData}));
-        });
-        await Promise.all(updatePromises);
-      } catch (error) {
-        console.error(error);
-      }
+export const propagateUserUpdate = functions.region("europe-west1").https.onCall(async (data, context) => {
+  try {
+    const userId = data.userId;
+    const updatePromises: any[] = [];
+    const updatedDocument = await firestoreDatabase.collection("users").doc(userId).get();
+    const updatedData = updatedDocument.data();
+    const experiencesQuery = await firestoreDatabase.collection("experiences").get();
+    const experienceByCreatorQuery = await firestoreDatabase.collection("experiences").where("creatorId", "==", userId).get();
+    const receiverNotificationQuery = await firestoreDatabase.collection("notifications").where("receiver.id", "==", userId).get();
+    const senderNotificationQuery = await firestoreDatabase.collection("notifications").where("sender.id", "==", userId).get();
+    // Updates the comments
+    experiencesQuery.docs.forEach(async (experienceDocument) => {
+      const commentsQuery = await experienceDocument.ref.collection("comments").where("poster.id", "==", userId).get();
+      updatePromises.push(commentsQuery.docs.forEach((commentDocument) => commentDocument.ref.update({poster: updatedData})));
     });
+    // Updates the creator of the experiences
+    experienceByCreatorQuery.docs.forEach((experienceDocument) => {
+      updatePromises.push(experienceDocument.ref.update({creator: updatedData}));
+    });
+    // Updates the receiver of the notifications
+    receiverNotificationQuery.docs.forEach((notificationDocument) => {
+      updatePromises.push(notificationDocument.ref.update({receiver: updatedData}));
+    });
+    // Updates the sender of the notifications
+    senderNotificationQuery.docs.forEach((notificationDocument) => {
+      updatePromises.push(notificationDocument.ref.update({sender: updatedData}));
+    });
+    await Promise.all(updatePromises);
+    return "Success";
+  } catch (error) {
+    console.error(error);
+    return "Error";
+  }
+});
 
 // Image deletion
 export const deleteUserImageOnUserDelete = functions.firestore.document("users/{id}").onDelete(async (snapshot) => {
   const userData = snapshot.data();
   const fileName = userData.imageUrl.substr(userData.imageUrl.indexOf("%2F") + 3, (userData.imageUrl.indexOf("?")) - (userData.imageUrl.indexOf("%2F") + 3));
   console.log(fileName);
-  const storage = admin.storage();
-  const defaultBucket = storage.bucket();
+  // const storage = admin.storage();
+  // const defaultBucket = storage.bucket();
   // const file = defaultBucket.deleteFiles(userData);
   // return file.delete();
 });
