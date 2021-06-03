@@ -250,22 +250,46 @@ export const propagateUserUpdate = functions.region("europe-west1").https.onCall
     const experienceByCreatorQuery = await firestoreDatabase.collection("experiences").where("creatorId", "==", userId).get();
     const receiverNotificationQuery = await firestoreDatabase.collection("notifications").where("receiver.id", "==", userId).get();
     const senderNotificationQuery = await firestoreDatabase.collection("notifications").where("sender.id", "==", userId).get();
+    const experienceCreatorNotificationQuery = await firestoreDatabase.collection("notifications").where("experience.creatorId", "==", userId).get();
     // Updates the comments
     experiencesQuery.docs.forEach(async (experienceDocument) => {
       const commentsQuery = await experienceDocument.ref.collection("comments").where("poster.id", "==", userId).get();
-      updatePromises.push(commentsQuery.docs.forEach((commentDocument) => commentDocument.ref.update({poster: updatedData})));
+      updatePromises.push(commentsQuery.docs.forEach((commentDocument) => commentDocument.ref.update({"poster": updatedData})));
     });
     // Updates the creator of the experiences
     experienceByCreatorQuery.docs.forEach((experienceDocument) => {
-      updatePromises.push(experienceDocument.ref.update({creator: updatedData}));
+      updatePromises.push(experienceDocument.ref.update({"creator": updatedData}));
     });
     // Updates the receiver of the notifications
     receiverNotificationQuery.docs.forEach((notificationDocument) => {
-      updatePromises.push(notificationDocument.ref.update({receiver: updatedData}));
+      updatePromises.push(notificationDocument.ref.update({"receiver": updatedData}));
     });
     // Updates the sender of the notifications
     senderNotificationQuery.docs.forEach((notificationDocument) => {
-      updatePromises.push(notificationDocument.ref.update({sender: updatedData}));
+      updatePromises.push(notificationDocument.ref.update({"sender": updatedData}));
+    });
+    // Updates the creator of the experiences of the notifications
+    experienceCreatorNotificationQuery.docs.forEach((notificationDocument) => {
+      updatePromises.push(notificationDocument.ref.update({"experience.creator": updatedData}));
+    });
+    await Promise.all(updatePromises);
+    return "Success";
+  } catch (error) {
+    console.error(error);
+    return "Error";
+  }
+});
+
+export const propagateExperienceUpdate = functions.region("europe-west1").https.onCall(async (data, context) => {
+  try {
+    const experienceId = data.userId;
+    const updatePromises: any[] = [];
+    const updatedDocument = await firestoreDatabase.collection("experiences").doc(experienceId).get();
+    const updatedData = updatedDocument.data();
+    const experiencesNotificationQuery = await firestoreDatabase.collection("notifications").where("experience.id", "==", experienceId).get();
+    // Updates the experiences of the notifications
+    experiencesNotificationQuery.docs.forEach((notificationDocument) => {
+      updatePromises.push(notificationDocument.ref.update({"experience": updatedData}));
     });
     await Promise.all(updatePromises);
     return "Success";
